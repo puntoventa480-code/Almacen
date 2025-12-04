@@ -1,3 +1,4 @@
+
 import React, { useState, useMemo, useEffect } from 'react';
 import { 
   LayoutDashboard, 
@@ -37,7 +38,8 @@ import {
   Send,
   Loader2,
   Sparkles,
-  Key
+  Key,
+  Unlock
 } from 'lucide-react';
 import { useLocalStorage } from './hooks/useLocalStorage';
 import { Product, Debt, SystemConfig, DEFAULT_CONFIG, ViewState, CartItem, StockMovement } from './types';
@@ -58,6 +60,7 @@ export default function App() {
   const [history, setHistory] = useLocalStorage<StockMovement[]>('db_history', []);
   const [clients, setClients] = useLocalStorage<string[]>('db_clients', []); 
   const [config, setConfig] = useLocalStorage<SystemConfig>('db_config', DEFAULT_CONFIG);
+  const [customApiKey, setCustomApiKey] = useLocalStorage<string>('db_api_key', '');
 
   // --- UI State ---
   const [currentView, setCurrentView] = useState<ViewState | 'pos' | 'ai'>('dashboard');
@@ -87,7 +90,10 @@ export default function App() {
   const [aiMessages, setAiMessages] = useState<{role: 'user' | 'model', text: string}[]>([]);
   const [aiInput, setAiInput] = useState('');
   const [isAiLoading, setIsAiLoading] = useState(false);
-  const [hasApiKey, setHasApiKey] = useState(false);
+  const [hasSystemApiKey, setHasSystemApiKey] = useState(false);
+  const [manualKeyInput, setManualKeyInput] = useState('');
+
+  const isAiReady = hasSystemApiKey || (customApiKey && customApiKey.length > 5);
   
   // --- Independent Ticket Data ---
   const [ticketConfig, setTicketConfig] = useState({
@@ -100,10 +106,10 @@ export default function App() {
   // Check API Key on mount and when view changes
   useEffect(() => {
     const checkKey = async () => {
-      const aistudio = (window as any).aistudio as AIStudio;
+      const aistudio = (window as any).aistudio as AIStudio | undefined;
       if (aistudio) {
         const has = await aistudio.hasSelectedApiKey();
-        setHasApiKey(has);
+        setHasSystemApiKey(has);
       }
     };
     checkKey();
@@ -512,17 +518,33 @@ export default function App() {
     }
   };
 
+  const handleSaveManualKey = () => {
+    if (manualKeyInput.trim().length > 0) {
+      setCustomApiKey(manualKeyInput.trim());
+      setManualKeyInput('');
+      alert("API Key guardada localmente.");
+    }
+  };
+
   // --- AI Logic ---
   const handleAiSendMessage = async () => {
     if (!aiInput.trim()) return;
     
+    // Determine which key to use: Custom Override OR System Environment
+    const apiKey = customApiKey || process.env.API_KEY;
+    
+    if (!apiKey) {
+      alert("No se encontró una API Key válida. Por favor conecta una llave.");
+      return;
+    }
+
     const userMsg = aiInput;
     setAiMessages(prev => [...prev, { role: 'user', text: userMsg }]);
     setAiInput('');
     setIsAiLoading(true);
 
     try {
-      const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+      const ai = new GoogleGenAI({ apiKey });
       
       // Define Tool for updating configuration
       const updateConfigTool: FunctionDeclaration = {
@@ -553,7 +575,7 @@ export default function App() {
         Clients with highest debt: ${JSON.stringify(filteredClients.slice(0, 5).map(c => ({name: c, debt: clientStats[c].total})))}
       `;
 
-      const result = await ai.models.generateContent({
+      const response = await ai.models.generateContent({
         model: 'gemini-2.5-flash',
         contents: [
             ...aiMessages.map(m => ({ role: m.role, parts: [{ text: m.text }] })),
@@ -570,10 +592,9 @@ export default function App() {
         }
       });
 
-      const response = result.response;
-      const toolCalls = response.functionCalls; // Use property access
+      const toolCalls = response?.functionCalls; 
 
-      let botResponseText = response.text || ''; // Use property access
+      let botResponseText = response?.text || ''; 
 
       if (toolCalls && toolCalls.length > 0) {
         const call = toolCalls[0];
@@ -601,49 +622,90 @@ export default function App() {
        {/* Status Bar */}
        <div className="bg-white p-3 border-b border-slate-100 flex items-center justify-between shadow-sm z-10 flex-shrink-0">
           <div className="flex items-center gap-2.5">
-             <div className={`w-2 h-2 rounded-full ${hasApiKey ? 'bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.5)]' : 'bg-rose-400'}`}></div>
+             <div className={`w-2 h-2 rounded-full ${isAiReady ? 'bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.5)]' : 'bg-rose-400'}`}></div>
              <span className="text-sm font-semibold text-slate-700">
-               {hasApiKey ? 'Gemini AI Conectado' : 'Sin Conexión'}
+               {isAiReady ? (customApiKey ? 'Gemini AI (Llave Manual)' : 'Gemini AI Conectado') : 'Sin Conexión'}
              </span>
           </div>
           <button 
-            onClick={() => ((window as any).aistudio as AIStudio).openSelectKey()}
-            className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg text-xs font-bold transition-all"
+             onClick={() => {
+                if(window.confirm("¿Desconectar API Key manual?")) setCustomApiKey('');
+             }}
+             className={`flex items-center gap-1.5 px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg text-xs font-bold transition-all ${!customApiKey ? 'hidden' : ''}`}
           >
-            <Key size={14} />
-            Administrar Llave
+            <Unlock size={14} /> Desconectar Manual
           </button>
        </div>
 
-       {!hasApiKey ? (
-         <div className="flex-1 flex flex-col items-center justify-center p-8 text-center bg-white/50 m-4 rounded-2xl border border-slate-100 border-dashed">
-            <div className="w-16 h-16 bg-indigo-50 rounded-2xl flex items-center justify-center mb-4 text-indigo-500">
-               <Bot size={32} />
+       {!isAiReady ? (
+         <div className="flex-1 overflow-y-auto">
+            <div className="flex flex-col items-center justify-center p-8 text-center bg-white m-4 rounded-2xl border border-slate-100 shadow-sm max-w-xl mx-auto mt-10">
+                <Sparkles size={48} className="text-indigo-500 mb-4" />
+                <h2 className="text-2xl font-bold text-slate-800 mb-2">Activar Asistente Inteligente</h2>
+                <p className="text-slate-500 max-w-md mb-6">
+                  Para usar el chat y realizar cambios automáticos en la app, necesitas conectar tu API Key de Google Gemini.
+                </p>
+                
+                <div className="w-full space-y-6">
+                    {/* System Option */}
+                    <div className="bg-indigo-50 p-4 rounded-xl border border-indigo-100">
+                      <p className="text-xs font-bold text-indigo-800 uppercase mb-3">Opción Recomendada</p>
+                      <button 
+                        onClick={() => ((window as any).aistudio as AIStudio).openSelectKey()}
+                        className="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-3 px-8 rounded-xl flex items-center justify-center gap-2 transition-all shadow-lg shadow-indigo-200"
+                      >
+                        <Code size={20} /> Conectar Automáticamente
+                      </button>
+                    </div>
+                    
+                    <div className="relative flex py-2 items-center">
+                        <div className="flex-grow border-t border-slate-200"></div>
+                        <span className="flex-shrink-0 mx-4 text-slate-400 text-xs font-bold uppercase">O Manualmente</span>
+                        <div className="flex-grow border-t border-slate-200"></div>
+                    </div>
+
+                    {/* Manual Option */}
+                    <div className="bg-slate-50 p-4 rounded-xl border border-slate-200">
+                        <p className="text-xs font-bold text-slate-500 uppercase mb-2 text-left">Pegar API Key</p>
+                        <div className="flex gap-2">
+                           <input 
+                             type="password"
+                             value={manualKeyInput}
+                             onChange={(e) => setManualKeyInput(e.target.value)}
+                             placeholder="sk-..."
+                             className="flex-1 p-3 rounded-xl border border-slate-300 focus:outline-none focus:ring-2 focus:ring-indigo-500 text-sm"
+                           />
+                           <button 
+                             onClick={handleSaveManualKey}
+                             disabled={!manualKeyInput}
+                             className="bg-slate-800 hover:bg-slate-700 disabled:opacity-50 text-white font-bold px-4 rounded-xl flex items-center gap-2"
+                           >
+                             <Save size={18} />
+                           </button>
+                        </div>
+                        <p className="text-[10px] text-slate-400 mt-2 text-left">
+                           Tu llave se guardará únicamente en el almacenamiento local de tu navegador.
+                        </p>
+                    </div>
+                </div>
+
+                <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noreferrer" className="text-xs text-indigo-500 mt-6 hover:underline">
+                  Conseguir API Key gratis en Google AI Studio
+                </a>
             </div>
-            <h2 className="text-xl font-bold text-slate-800 mb-2">Asistente Inteligente</h2>
-            <p className="text-slate-500 max-w-xs mb-6 text-sm">
-              Conecta tu API Key de Google para chatear con tu inventario y realizar configuraciones automáticas.
-            </p>
-            <button 
-              onClick={() => ((window as any).aistudio as AIStudio).openSelectKey()}
-              className="bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-2.5 px-6 rounded-xl flex items-center gap-2 transition-all shadow-lg shadow-indigo-200 text-sm"
-            >
-              <Key size={18} /> Conectar API Key
-            </button>
          </div>
        ) : (
          <div className="flex-1 bg-white rounded-2xl shadow-sm border border-slate-100 flex flex-col overflow-hidden m-4 relative">
-             {/* Chat Messages */}
              <div className="flex-1 overflow-y-auto p-4 space-y-4 bg-slate-50/50">
                 {aiMessages.length === 0 && (
                   <div className="text-center py-10 opacity-50">
                     <Bot size={48} className="mx-auto mb-2 text-indigo-300" />
-                    <p className="text-slate-500 text-sm">Hola, soy tu asistente. Pregúntame sobre stock, ventas o deudas.</p>
+                    <p className="text-slate-500">Hola, soy tu asistente. Pregúntame sobre tu inventario, deudas, o pídeme que cambie el nombre del negocio.</p>
                   </div>
                 )}
                 {aiMessages.map((m, i) => (
                   <div key={i} className={`flex ${m.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-                     <div className={`max-w-[85%] p-3 rounded-2xl text-sm ${m.role === 'user' ? 'bg-indigo-600 text-white rounded-tr-none' : 'bg-white border border-slate-200 text-slate-700 rounded-tl-none shadow-sm'}`}>
+                     <div className={`max-w-[80%] p-3 rounded-2xl ${m.role === 'user' ? 'bg-indigo-600 text-white rounded-tr-none' : 'bg-white border border-slate-200 text-slate-700 rounded-tl-none shadow-sm'}`}>
                         {m.text}
                      </div>
                   </div>
@@ -652,26 +714,25 @@ export default function App() {
                   <div className="flex justify-start">
                     <div className="bg-white border border-slate-200 p-3 rounded-2xl rounded-tl-none shadow-sm flex items-center gap-2">
                        <Loader2 size={16} className="animate-spin text-indigo-500" />
-                       <span className="text-xs text-slate-400">Procesando...</span>
+                       <span className="text-xs text-slate-400">Pensando...</span>
                     </div>
                   </div>
                 )}
              </div>
-             {/* Input Area */}
-             <div className="p-3 bg-white border-t border-slate-100 flex gap-2">
+             <div className="p-4 bg-white border-t border-slate-100 flex gap-2">
                 <input 
                   value={aiInput}
                   onChange={(e) => setAiInput(e.target.value)}
                   onKeyDown={(e) => e.key === 'Enter' && handleAiSendMessage()}
-                  placeholder="Escribe tu consulta..."
-                  className="flex-1 p-2.5 rounded-xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-indigo-500 bg-slate-50 text-sm"
+                  placeholder="Escribe tu consulta o instrucción..."
+                  className="flex-1 p-3 rounded-xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-indigo-500 bg-slate-50"
                 />
                 <button 
                   onClick={handleAiSendMessage}
                   disabled={isAiLoading || !aiInput.trim()}
-                  className="bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white p-2.5 rounded-xl transition-colors"
+                  className="bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white p-3 rounded-xl transition-colors"
                 >
-                  <Send size={18} />
+                  <Send size={20} />
                 </button>
              </div>
          </div>

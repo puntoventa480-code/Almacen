@@ -1,3 +1,4 @@
+
 import React, { useState, useMemo, useEffect } from 'react';
 import { 
   LayoutDashboard, 
@@ -36,7 +37,9 @@ import {
   Bot,
   Send,
   Loader2,
-  Sparkles
+  Sparkles,
+  Key,
+  Unlock
 } from 'lucide-react';
 import { useLocalStorage } from './hooks/useLocalStorage';
 import { Product, Debt, SystemConfig, DEFAULT_CONFIG, ViewState, CartItem, StockMovement } from './types';
@@ -57,6 +60,7 @@ export default function App() {
   const [history, setHistory] = useLocalStorage<StockMovement[]>('db_history', []);
   const [clients, setClients] = useLocalStorage<string[]>('db_clients', []); 
   const [config, setConfig] = useLocalStorage<SystemConfig>('db_config', DEFAULT_CONFIG);
+  const [customApiKey, setCustomApiKey] = useLocalStorage<string>('db_api_key', '');
 
   // --- UI State ---
   const [currentView, setCurrentView] = useState<ViewState | 'pos' | 'ai'>('dashboard');
@@ -86,7 +90,10 @@ export default function App() {
   const [aiMessages, setAiMessages] = useState<{role: 'user' | 'model', text: string}[]>([]);
   const [aiInput, setAiInput] = useState('');
   const [isAiLoading, setIsAiLoading] = useState(false);
-  const [hasApiKey, setHasApiKey] = useState(false);
+  const [hasSystemApiKey, setHasSystemApiKey] = useState(false);
+  const [manualKeyInput, setManualKeyInput] = useState('');
+
+  const isAiReady = hasSystemApiKey || (customApiKey && customApiKey.length > 5);
   
   // --- Independent Ticket Data ---
   const [ticketConfig, setTicketConfig] = useState({
@@ -99,10 +106,10 @@ export default function App() {
   // Check API Key on mount and when view changes
   useEffect(() => {
     const checkKey = async () => {
-      const aistudio = (window as any).aistudio as AIStudio;
+      const aistudio = (window as any).aistudio as AIStudio | undefined;
       if (aistudio) {
         const has = await aistudio.hasSelectedApiKey();
-        setHasApiKey(has);
+        setHasSystemApiKey(has);
       }
     };
     checkKey();
@@ -511,17 +518,33 @@ export default function App() {
     }
   };
 
+  const handleSaveManualKey = () => {
+    if (manualKeyInput.trim().length > 0) {
+      setCustomApiKey(manualKeyInput.trim());
+      setManualKeyInput('');
+      alert("API Key guardada localmente.");
+    }
+  };
+
   // --- AI Logic ---
   const handleAiSendMessage = async () => {
     if (!aiInput.trim()) return;
     
+    // Determine which key to use: Custom Override OR System Environment
+    const apiKey = customApiKey || process.env.API_KEY;
+    
+    if (!apiKey) {
+      alert("No se encontró una API Key válida. Por favor conecta una llave.");
+      return;
+    }
+
     const userMsg = aiInput;
     setAiMessages(prev => [...prev, { role: 'user', text: userMsg }]);
     setAiInput('');
     setIsAiLoading(true);
 
     try {
-      const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+      const ai = new GoogleGenAI({ apiKey });
       
       // Define Tool for updating configuration
       const updateConfigTool: FunctionDeclaration = {
@@ -552,7 +575,7 @@ export default function App() {
         Clients with highest debt: ${JSON.stringify(filteredClients.slice(0, 5).map(c => ({name: c, debt: clientStats[c].total})))}
       `;
 
-      const result = await ai.models.generateContent({
+      const response = await ai.models.generateContent({
         model: 'gemini-2.5-flash',
         contents: [
             ...aiMessages.map(m => ({ role: m.role, parts: [{ text: m.text }] })),
@@ -569,10 +592,9 @@ export default function App() {
         }
       });
 
-      const response = result.response;
-      const toolCalls = response.functionCalls; // Use property access
+      const toolCalls = response?.functionCalls; 
 
-      let botResponseText = response.text || ''; // Use property access
+      let botResponseText = response?.text || ''; 
 
       if (toolCalls && toolCalls.length > 0) {
         const call = toolCalls[0];
@@ -597,22 +619,80 @@ export default function App() {
 
   const renderAI = () => (
     <div className="h-[calc(100vh-140px)] flex flex-col animate-in fade-in duration-300">
-       {!hasApiKey ? (
-         <div className="flex-1 flex flex-col items-center justify-center p-8 text-center bg-white rounded-2xl shadow-sm border border-slate-100 m-4">
-            <Sparkles size={48} className="text-indigo-500 mb-4" />
-            <h2 className="text-2xl font-bold text-slate-800 mb-2">Activar Asistente Inteligente</h2>
-            <p className="text-slate-500 max-w-md mb-6">
-              Para usar el chat y realizar cambios automáticos en la app, necesitas conectar tu API Key de Google Gemini.
-            </p>
-            <button 
-              onClick={() => ((window as any).aistudio as AIStudio).openSelectKey()}
-              className="bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-3 px-8 rounded-xl flex items-center gap-2 transition-all shadow-lg shadow-indigo-200"
-            >
-              <Code size={20} /> Conectar API Key
-            </button>
-            <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noreferrer" className="text-xs text-indigo-500 mt-4 hover:underline">
-              Conseguir API Key gratis
-            </a>
+       {/* Status Bar */}
+       <div className="bg-white p-3 border-b border-slate-100 flex items-center justify-between shadow-sm z-10 flex-shrink-0">
+          <div className="flex items-center gap-2.5">
+             <div className={`w-2 h-2 rounded-full ${isAiReady ? 'bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.5)]' : 'bg-rose-400'}`}></div>
+             <span className="text-sm font-semibold text-slate-700">
+               {isAiReady ? (customApiKey ? 'Gemini AI (Llave Manual)' : 'Gemini AI Conectado') : 'Sin Conexión'}
+             </span>
+          </div>
+          <button 
+             onClick={() => {
+                if(window.confirm("¿Desconectar API Key manual?")) setCustomApiKey('');
+             }}
+             className={`flex items-center gap-1.5 px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg text-xs font-bold transition-all ${!customApiKey ? 'hidden' : ''}`}
+          >
+            <Unlock size={14} /> Desconectar Manual
+          </button>
+       </div>
+
+       {!isAiReady ? (
+         <div className="flex-1 overflow-y-auto">
+            <div className="flex flex-col items-center justify-center p-8 text-center bg-white m-4 rounded-2xl border border-slate-100 shadow-sm max-w-xl mx-auto mt-10">
+                <Sparkles size={48} className="text-indigo-500 mb-4" />
+                <h2 className="text-2xl font-bold text-slate-800 mb-2">Activar Asistente Inteligente</h2>
+                <p className="text-slate-500 max-w-md mb-6">
+                  Para usar el chat y realizar cambios automáticos en la app, necesitas conectar tu API Key de Google Gemini.
+                </p>
+                
+                <div className="w-full space-y-6">
+                    {/* System Option */}
+                    <div className="bg-indigo-50 p-4 rounded-xl border border-indigo-100">
+                      <p className="text-xs font-bold text-indigo-800 uppercase mb-3">Opción Recomendada</p>
+                      <button 
+                        onClick={() => ((window as any).aistudio as AIStudio).openSelectKey()}
+                        className="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-3 px-8 rounded-xl flex items-center justify-center gap-2 transition-all shadow-lg shadow-indigo-200"
+                      >
+                        <Code size={20} /> Conectar Automáticamente
+                      </button>
+                    </div>
+                    
+                    <div className="relative flex py-2 items-center">
+                        <div className="flex-grow border-t border-slate-200"></div>
+                        <span className="flex-shrink-0 mx-4 text-slate-400 text-xs font-bold uppercase">O Manualmente</span>
+                        <div className="flex-grow border-t border-slate-200"></div>
+                    </div>
+
+                    {/* Manual Option */}
+                    <div className="bg-slate-50 p-4 rounded-xl border border-slate-200">
+                        <p className="text-xs font-bold text-slate-500 uppercase mb-2 text-left">Pegar API Key</p>
+                        <div className="flex gap-2">
+                           <input 
+                             type="password"
+                             value={manualKeyInput}
+                             onChange={(e) => setManualKeyInput(e.target.value)}
+                             placeholder="sk-..."
+                             className="flex-1 p-3 rounded-xl border border-slate-300 focus:outline-none focus:ring-2 focus:ring-indigo-500 text-sm"
+                           />
+                           <button 
+                             onClick={handleSaveManualKey}
+                             disabled={!manualKeyInput}
+                             className="bg-slate-800 hover:bg-slate-700 disabled:opacity-50 text-white font-bold px-4 rounded-xl flex items-center gap-2"
+                           >
+                             <Save size={18} />
+                           </button>
+                        </div>
+                        <p className="text-[10px] text-slate-400 mt-2 text-left">
+                           Tu llave se guardará únicamente en el almacenamiento local de tu navegador.
+                        </p>
+                    </div>
+                </div>
+
+                <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noreferrer" className="text-xs text-indigo-500 mt-6 hover:underline">
+                  Conseguir API Key gratis en Google AI Studio
+                </a>
+            </div>
          </div>
        ) : (
          <div className="flex-1 bg-white rounded-2xl shadow-sm border border-slate-100 flex flex-col overflow-hidden m-4 relative">
@@ -1567,150 +1647,4 @@ export default function App() {
         onClose={() => setIsHistoryModalOpen(false)}
         title={`Historial: ${editingItem?.name}`}
       >
-        <div className="space-y-3 max-h-[60vh] overflow-y-auto pr-1">
-           {itemHistory.length === 0 ? (
-               <div className="text-center py-8 text-slate-400 italic">No hay movimientos registrados.</div>
-           ) : (
-               itemHistory.map(h => (
-                   <div key={h.id} className="flex items-center justify-between p-3 bg-slate-50 rounded-lg border border-slate-100">
-                       <div>
-                           <div className="flex items-center gap-2">
-                              <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded uppercase ${h.type === 'entrada' ? 'bg-emerald-100 text-emerald-700' : 'bg-indigo-100 text-indigo-700'}`}>
-                                {h.type}
-                              </span>
-                              <span className="text-xs text-slate-400">{new Date(h.date).toLocaleString()}</span>
-                           </div>
-                           <p className="font-bold text-slate-700 text-sm mt-1">{h.note}</p>
-                       </div>
-                       <div className="flex items-center gap-3">
-                           <span className={`text-lg font-bold ${h.type === 'entrada' ? 'text-emerald-600' : 'text-slate-600'}`}>
-                              {h.type === 'entrada' ? '+' : '-'}{h.quantity}
-                           </span>
-                           {/* Allow delete for corrections */}
-                           <button 
-                             onClick={() => handleDeleteHistoryItem(h)}
-                             className="text-slate-300 hover:text-rose-500 p-1"
-                             title="Eliminar registro (Revertir)"
-                           >
-                             <Trash2 size={16}/>
-                           </button>
-                       </div>
-                   </div>
-               ))
-           )}
-        </div>
-      </Modal>
-
-      {/* Ticket Config Modal */}
-      <Modal
-        isOpen={isTicketModalOpen}
-        onClose={() => setIsTicketModalOpen(false)}
-        title="Datos para Factura / Ticket"
-      >
-        <div className="flex flex-col md:flex-row gap-6">
-            <div className="flex-1 space-y-4">
-                <div className="bg-indigo-50 p-4 rounded-xl border border-indigo-100 mb-4">
-                    <p className="text-xs text-indigo-800 mb-2 font-medium">
-                        Estos datos son exclusivamente para la impresión del ticket y no afectan al cliente seleccionado en el sistema.
-                    </p>
-                </div>
-                <div>
-                  <label className="block text-sm font-bold text-slate-700 mb-1">Título del Ticket</label>
-                  <input 
-                    value={ticketConfig.title}
-                    onChange={(e) => setTicketConfig({...ticketConfig, title: e.target.value})}
-                    className="w-full p-2.5 rounded-xl border border-slate-200 focus:ring-2 focus:ring-indigo-500 outline-none font-bold text-indigo-900" 
-                    placeholder="Ej. NOTA DE ENTREGA"
-                  />
-                </div>
-                <div>
-                  <label className="block text-sm font-bold text-slate-700 mb-1">Nombre Cliente</label>
-                  <input 
-                    value={ticketConfig.name}
-                    onChange={(e) => setTicketConfig({...ticketConfig, name: e.target.value})}
-                    className="w-full p-2.5 rounded-xl border border-slate-200 focus:ring-2 focus:ring-indigo-500 outline-none" 
-                    placeholder="Dejar vacío para usar cliente del sistema"
-                  />
-                </div>
-                <div>
-                  <label className="block text-sm font-bold text-slate-700 mb-1">CI / DNI</label>
-                  <input 
-                    value={ticketConfig.ci}
-                    onChange={(e) => setTicketConfig({...ticketConfig, ci: e.target.value})}
-                    className="w-full p-2.5 rounded-xl border border-slate-200 focus:ring-2 focus:ring-indigo-500 outline-none" 
-                    placeholder="Documento de Identidad"
-                  />
-                </div>
-                <div>
-                  <label className="block text-sm font-bold text-slate-700 mb-1">Dirección</label>
-                  <input 
-                    value={ticketConfig.address}
-                    onChange={(e) => setTicketConfig({...ticketConfig, address: e.target.value})}
-                    className="w-full p-2.5 rounded-xl border border-slate-200 focus:ring-2 focus:ring-indigo-500 outline-none" 
-                    placeholder="Dirección fiscal"
-                  />
-                </div>
-                <button 
-                  onClick={() => setIsTicketModalOpen(false)}
-                  className="w-full bg-indigo-600 text-white py-2 rounded-xl font-bold mt-4"
-                >
-                  Guardar y Volver
-                </button>
-            </div>
-            
-            {/* Live Preview - Updated to mimic Thermal Printer style */}
-            <div className="w-full md:w-64 bg-slate-200 p-4 rounded-xl border border-slate-300 flex flex-col items-center">
-                <span className="text-xs text-slate-500 font-bold mb-2 uppercase tracking-wider flex items-center gap-1"><Eye size={12}/> Vista Previa (58mm)</span>
-                <div className="bg-white p-2 w-[58mm] min-h-[250px] shadow-sm text-[11px] font-[Courier] leading-tight text-black overflow-hidden relative">
-                    <div className="text-center mb-2">
-                        <div className="text-base uppercase" style={{fontSize: '14px'}}>{config.shopName}</div>
-                        <div className="uppercase my-1" style={{fontSize: '12px'}}>{ticketConfig.title}</div>
-                        <div>Nº: {Math.floor(Math.random() * 1000)}</div>
-                        <div>{new Date().toLocaleDateString('es-MX')}</div>
-                    </div>
-                    
-                    <div className="border-t border-dashed border-black my-1"></div>
-                    
-                    <div className="mb-2">
-                        <div>CLI: {(ticketConfig.name || posClient || 'CONSUMIDOR FINAL').toUpperCase()}</div>
-                        {ticketConfig.ci && <div>CI: {ticketConfig.ci}</div>}
-                    </div>
-
-                    <div className="border-t border-dashed border-black my-1"></div>
-
-                    <div className="space-y-2">
-                        {Object.keys(cart).length === 0 ? (
-                           <div className="text-slate-400 italic text-center py-2">-- Vacío --</div>
-                        ) : (
-                           Object.entries(cart).map(([id, item]) => {
-                               const p = products.find(prod => prod.id === id);
-                               const cartItem = item as CartItem;
-                               return (
-                                   <div key={id}>
-                                       <div className="uppercase">{p?.name.substring(0, 25)}</div>
-                                       <div className="flex justify-between">
-                                          <span>{cartItem.quantity} x {formatNumber(cartItem.customPrice)}</span>
-                                          <span>{formatNumber(cartItem.quantity * cartItem.customPrice)}</span>
-                                       </div>
-                                   </div>
-                               );
-                           })
-                        )}
-                    </div>
-
-                    <div className="border-y border-dashed border-black my-2 py-1 flex justify-between text-sm" style={{fontSize: '14px'}}>
-                        <span>TOTAL:</span>
-                        <span>{formatCurrency(cartTotal, config.currencySymbol)}</span>
-                    </div>
-
-                    <div className="mt-8 text-center">
-                       <div className="border-t border-black w-3/4 mx-auto mb-1"></div>
-                       <div className="text-[10px]">Firma / Recibí Conforme</div>
-                    </div>
-                </div>
-            </div>
-        </div>
-      </Modal>
-    </div>
-  );
-}
+        <div className="
