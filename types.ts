@@ -36,6 +36,10 @@ export interface SystemConfig {
   shopName: string;
   enableLowStockWarning: boolean;
   lowStockThreshold: number;
+  googleDriveClientId?: string; // Client ID for Google Auth
+  googleDriveBackupFileId?: string; // ID of the file in Drive
+  googleDriveFolderId?: string; // ID of the specific folder in Drive
+  lastSync?: string; // Timestamp of last successful sync
 }
 
 export interface CartItem {

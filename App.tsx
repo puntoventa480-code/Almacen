@@ -1,5 +1,5 @@
 
-import React, { useState, useMemo, useEffect } from 'react';
+import React, { useState, useMemo, useEffect, useCallback, useRef } from 'react';
 import { 
   LayoutDashboard, 
   Package, 
@@ -39,7 +39,15 @@ import {
   Loader2,
   Sparkles,
   Key,
-  Unlock
+  Unlock,
+  Cloud,
+  CloudLightning,
+  DownloadCloud,
+  UploadCloud,
+  LogOut,
+  Download,
+  Upload,
+  HardDrive
 } from 'lucide-react';
 import { useLocalStorage } from './hooks/useLocalStorage';
 import { Product, Debt, SystemConfig, DEFAULT_CONFIG, ViewState, CartItem, StockMovement } from './types';
@@ -47,6 +55,14 @@ import { formatCurrency, formatNumber, generateId, formatDate, generateSKU, proc
 import { StatCard } from './components/StatCard';
 import { Modal } from './components/Modal';
 import { GoogleGenAI, Type, FunctionDeclaration } from "@google/genai";
+
+// Declare google types for window
+declare global {
+  interface Window {
+    google: any;
+    gapi: any;
+  }
+}
 
 interface AIStudio {
   hasSelectedApiKey: () => Promise<boolean>;
@@ -93,6 +109,15 @@ export default function App() {
   const [hasSystemApiKey, setHasSystemApiKey] = useState(false);
   const [manualKeyInput, setManualKeyInput] = useState('');
 
+  // --- Drive Sync State ---
+  const [isGapiLoaded, setIsGapiLoaded] = useState(false);
+  const [isSyncing, setIsSyncing] = useState(false);
+  const [tokenClient, setTokenClient] = useState<any>(null);
+  const [userInfo, setUserInfo] = useState<any>(null);
+  
+  // --- Local Backup Ref ---
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
   const isAiReady = hasSystemApiKey || (customApiKey && customApiKey.length > 5);
   
   // --- Independent Ticket Data ---
@@ -114,6 +139,266 @@ export default function App() {
     };
     checkKey();
   }, [currentView]);
+
+  // --- Google Drive Logic ---
+
+  // Load Google Scripts
+  useEffect(() => {
+    const loadGapi = () => {
+      if (window.gapi) {
+        window.gapi.load('client', async () => {
+          await window.gapi.client.init({
+            discoveryDocs: ['https://www.googleapis.com/discovery/v1/apis/drive/v3/rest'],
+          });
+          setIsGapiLoaded(true);
+        });
+      }
+    };
+    
+    // Check if scripts are loaded, if not wait a bit (they are in index.html but might lag)
+    if (!window.gapi) {
+      const interval = setInterval(() => {
+        if (window.gapi) {
+          clearInterval(interval);
+          loadGapi();
+        }
+      }, 500);
+    } else {
+      loadGapi();
+    }
+  }, []);
+
+  // Initialize Token Client when GAPI is ready
+  useEffect(() => {
+    if (isGapiLoaded && window.google && config.googleDriveClientId) {
+      const client = window.google.accounts.oauth2.initTokenClient({
+        client_id: config.googleDriveClientId,
+        scope: 'https://www.googleapis.com/auth/drive.file',
+        callback: async (tokenResponse: any) => {
+          if (tokenResponse && tokenResponse.access_token) {
+             try {
+                setUserInfo({ connected: true });
+                await checkForRemoteUpdates();
+             } catch (e) {
+               console.error("Error post-auth", e);
+             }
+          }
+        },
+      });
+      setTokenClient(client);
+    }
+  }, [isGapiLoaded, config.googleDriveClientId]);
+
+  // Sync Data Object
+  const getSyncData = () => ({
+    products,
+    debts,
+    history,
+    clients,
+    config,
+    timestamp: new Date().toISOString()
+  });
+
+  const uploadToDrive = async (isManual = false) => {
+    if (!tokenClient || !window.gapi.client.drive) return;
+    setIsSyncing(true);
+
+    try {
+       const data = getSyncData();
+       const fileContent = JSON.stringify(data);
+       const fileName = 'gestor_pro_backup.json';
+
+       // 1. Find existing file
+       let fileId = config.googleDriveBackupFileId;
+       
+       if (!fileId) {
+         const response = await window.gapi.client.drive.files.list({
+           q: `name = '${fileName}' and trashed = false`,
+           fields: 'files(id)',
+         });
+         if (response.result.files && response.result.files.length > 0) {
+           fileId = response.result.files[0].id;
+           // Update local config with found ID
+           setConfig(prev => ({...prev, googleDriveBackupFileId: fileId}));
+         }
+       }
+
+       const metadata = {
+         name: fileName,
+         mimeType: 'application/json',
+       };
+
+       const accessToken = window.gapi.client.getToken()?.access_token;
+       if (!accessToken) {
+         if(isManual) tokenClient.requestAccessToken({ prompt: '' });
+         setIsSyncing(false);
+         return;
+       }
+
+       const file = new Blob([fileContent], { type: 'application/json' });
+       
+       const form = new FormData();
+       form.append('metadata', new Blob([JSON.stringify(metadata)], { type: 'application/json' }));
+       form.append('file', file);
+
+       let url = 'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart';
+       let method = 'POST';
+
+       if (fileId) {
+         url = `https://www.googleapis.com/upload/drive/v3/files/${fileId}?uploadType=multipart`;
+         method = 'PATCH';
+       }
+
+       const res = await fetch(url, {
+         method: method,
+         headers: {
+           Authorization: `Bearer ${accessToken}`,
+         },
+         body: form,
+       });
+
+       if (res.ok) {
+         const json = await res.json();
+         const newFileId = json.id;
+         setConfig(prev => ({
+            ...prev, 
+            googleDriveBackupFileId: newFileId,
+            lastSync: new Date().toISOString()
+         }));
+         if (isManual) alert("Datos sincronizados con Google Drive exitosamente.");
+       } else {
+         console.error("Upload error", res.statusText);
+       }
+
+    } catch (error) {
+      console.error("Sync Error", error);
+      if (isManual) alert("Error al sincronizar. Verifica tu conexión.");
+    } finally {
+      setIsSyncing(false);
+    }
+  };
+
+  const checkForRemoteUpdates = async () => {
+    if (!window.gapi.client.drive) return;
+    setIsSyncing(true);
+    
+    try {
+      // Find file
+      const fileName = 'gestor_pro_backup.json';
+      const response = await window.gapi.client.drive.files.list({
+           q: `name = '${fileName}' and trashed = false`,
+           fields: 'files(id, modifiedTime)',
+      });
+
+      const files = response.result.files;
+      if (files && files.length > 0) {
+        const remoteFile = files[0];
+        const localTime = config.lastSync ? new Date(config.lastSync).getTime() : 0;
+        const remoteTime = new Date(remoteFile.modifiedTime).getTime();
+
+        if (remoteTime > localTime + 60000) {
+           if (window.confirm("Se han encontrado datos más recientes en Google Drive. ¿Deseas restaurarlos? (Esto sobrescribirá los datos locales)")) {
+              await restoreFromDrive(remoteFile.id);
+           }
+        }
+      }
+    } catch (e) {
+      console.error(e);
+    } finally {
+      setIsSyncing(false);
+    }
+  };
+
+  const restoreFromDrive = async (fileId: string) => {
+    try {
+      const response = await window.gapi.client.drive.files.get({
+        fileId: fileId,
+        alt: 'media',
+      });
+      
+      const data = response.result;
+      if (data) {
+        if (data.products) setProducts(data.products);
+        if (data.debts) setDebts(data.debts);
+        if (data.history) setHistory(data.history);
+        if (data.clients) setClients(data.clients);
+        if (data.config) setConfig({ ...data.config, googleDriveClientId: config.googleDriveClientId }); // Keep local client ID
+        alert("Datos restaurados correctamente.");
+      }
+    } catch (e) {
+      alert("Error al descargar copia de seguridad.");
+    }
+  };
+
+  const handleDriveConnect = () => {
+    if (tokenClient) {
+      tokenClient.requestAccessToken({ prompt: 'consent' });
+    } else {
+      alert("Configura tu Client ID primero en Ajustes.");
+    }
+  };
+
+  // --- Local Backup Logic ---
+  const handleExportData = () => {
+    const data = getSyncData();
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `gestor-pro-backup-${new Date().toISOString().split('T')[0]}.json`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+  };
+
+  const handleImportData = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      try {
+        const json = JSON.parse(event.target?.result as string);
+        if (window.confirm("¿Estás seguro de restaurar este archivo? Se reemplazarán los datos actuales.")) {
+           if (json.products) setProducts(json.products);
+           if (json.debts) setDebts(json.debts);
+           if (json.history) setHistory(json.history);
+           if (json.clients) setClients(json.clients);
+           if (json.config) setConfig(prev => ({ ...prev, ...json.config }));
+           alert("Datos restaurados correctamente desde el archivo local.");
+        }
+      } catch (err) {
+        alert("Error al leer el archivo. Asegúrate de que es un backup válido.");
+      }
+    };
+    reader.readAsText(file);
+    // Reset file input so same file can be selected again if needed
+    e.target.value = '';
+  };
+
+
+  // --- Sync triggers ---
+  
+  // 1. On Visibility Change (Close/Hide)
+  useEffect(() => {
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'hidden' && userInfo && config.googleDriveClientId) {
+        uploadToDrive();
+      }
+    };
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    return () => document.removeEventListener('visibilitychange', handleVisibilityChange);
+  }, [userInfo, products, debts]); // Depend on data
+
+  // 2. Initial check on mount if configured
+  const hasCheckedRemote = useRef(false);
+  useEffect(() => {
+     if (isGapiLoaded && config.googleDriveClientId && !hasCheckedRemote.current) {
+        // We rely on user action for first connect
+     }
+  }, [isGapiLoaded]);
+
 
   // --- Derived State (Memoized) ---
   const totalStockValue = useMemo(() => 
@@ -1257,7 +1542,146 @@ export default function App() {
   );
 
   const renderSettings = () => (
-    <div className="animate-in fade-in duration-500">
+    <div className="animate-in fade-in duration-500 space-y-6">
+      
+      {/* Google Drive Sync Section */}
+      <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-100">
+         <div className="flex items-center gap-3 mb-4">
+             <div className="p-2 bg-blue-50 rounded-lg text-blue-600">
+               <Cloud size={24} />
+             </div>
+             <div>
+               <h3 className="text-lg font-bold text-slate-800">Sincronización en la Nube (Google Drive)</h3>
+               <p className="text-sm text-slate-500">Guarda automáticamente tus datos al cerrar la app.</p>
+             </div>
+         </div>
+
+         <div className="bg-slate-50 p-4 rounded-xl border border-slate-200">
+            {!config.googleDriveClientId ? (
+               <div className="space-y-4">
+                  <p className="text-sm text-slate-600">
+                    Para activar la sincronización, necesitas un <strong>Client ID</strong> de Google Cloud.
+                    <br/>
+                    <a href="https://console.cloud.google.com/" target="_blank" className="text-blue-600 hover:underline">Ir a Google Cloud Console &rarr;</a>
+                  </p>
+                  <div>
+                    <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Google Client ID</label>
+                    <input 
+                      value={manualKeyInput} 
+                      onChange={(e) => setManualKeyInput(e.target.value)}
+                      placeholder="Ej. 123456789-abc...apps.googleusercontent.com"
+                      className="w-full p-3 rounded-xl border border-slate-300 focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm"
+                    />
+                  </div>
+                  <button 
+                    onClick={() => {
+                       setConfig(prev => ({ ...prev, googleDriveClientId: manualKeyInput }));
+                       setManualKeyInput('');
+                    }}
+                    className="bg-blue-600 text-white px-4 py-2 rounded-xl font-bold text-sm"
+                  >
+                    Guardar ID
+                  </button>
+               </div>
+            ) : (
+               <div className="space-y-4">
+                  <div className="flex items-center justify-between">
+                     <div className="flex items-center gap-2">
+                        <div className={`w-2.5 h-2.5 rounded-full ${userInfo?.connected ? 'bg-emerald-500' : 'bg-slate-300'}`}></div>
+                        <span className="font-bold text-slate-700">Estado: {userInfo?.connected ? 'Conectado' : 'Esperando autorización...'}</span>
+                     </div>
+                     {config.lastSync && (
+                       <span className="text-xs text-slate-400">Última Sync: {new Date(config.lastSync).toLocaleString()}</span>
+                     )}
+                  </div>
+                  
+                  <div className="flex gap-2">
+                     {!userInfo?.connected && (
+                        <button 
+                          onClick={handleDriveConnect}
+                          className="flex items-center gap-2 bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-xl font-bold text-sm transition-colors"
+                        >
+                          <CloudLightning size={16} /> Conectar con Google
+                        </button>
+                     )}
+                     
+                     {userInfo?.connected && (
+                       <>
+                         <button 
+                           onClick={() => uploadToDrive(true)}
+                           disabled={isSyncing}
+                           className="flex items-center gap-2 bg-emerald-600 hover:bg-emerald-700 text-white px-4 py-2 rounded-xl font-bold text-sm transition-colors disabled:opacity-50"
+                         >
+                           {isSyncing ? <Loader2 size={16} className="animate-spin"/> : <UploadCloud size={16} />} 
+                           Subir Ahora
+                         </button>
+                         <button 
+                           onClick={checkForRemoteUpdates}
+                           disabled={isSyncing}
+                           className="flex items-center gap-2 bg-slate-200 hover:bg-slate-300 text-slate-700 px-4 py-2 rounded-xl font-bold text-sm transition-colors disabled:opacity-50"
+                         >
+                           <DownloadCloud size={16} /> Restaurar
+                         </button>
+                       </>
+                     )}
+
+                     <button 
+                       onClick={() => {
+                         if(window.confirm("¿Desvincular cuenta?")) {
+                            setConfig(prev => ({ ...prev, googleDriveClientId: undefined, googleDriveBackupFileId: undefined }));
+                            setUserInfo(null);
+                            setTokenClient(null);
+                         }
+                       }}
+                       className="ml-auto text-rose-500 hover:bg-rose-50 px-3 py-2 rounded-xl"
+                       title="Desvincular"
+                     >
+                       <LogOut size={18} />
+                     </button>
+                  </div>
+               </div>
+            )}
+         </div>
+      </div>
+      
+      {/* Local Backup Section */}
+      <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-100">
+         <div className="flex items-center gap-3 mb-4">
+             <div className="p-2 bg-amber-50 rounded-lg text-amber-600">
+               <HardDrive size={24} />
+             </div>
+             <div>
+               <h3 className="text-lg font-bold text-slate-800">Respaldo Local (Archivo)</h3>
+               <p className="text-sm text-slate-500">Descarga o sube tus datos manualmente en un archivo.</p>
+             </div>
+         </div>
+
+         <div className="bg-slate-50 p-4 rounded-xl border border-slate-200 flex flex-wrap gap-4">
+            <button 
+              onClick={handleExportData}
+              className="flex items-center gap-2 bg-amber-600 hover:bg-amber-700 text-white px-5 py-3 rounded-xl font-bold text-sm transition-colors"
+            >
+              <Download size={18} /> Guardar Datos
+            </button>
+
+            <button 
+              onClick={() => fileInputRef.current?.click()}
+              className="flex items-center gap-2 bg-slate-200 hover:bg-slate-300 text-slate-700 px-5 py-3 rounded-xl font-bold text-sm transition-colors"
+            >
+              <Upload size={18} /> Cargar Datos
+            </button>
+            
+            {/* Hidden Input for File Selection */}
+            <input 
+              type="file" 
+              ref={fileInputRef} 
+              className="hidden" 
+              accept=".json" 
+              onChange={handleImportData}
+            />
+         </div>
+      </div>
+
       <div className="bg-slate-900 text-slate-300 p-6 rounded-2xl shadow-lg font-mono">
         <div className="flex items-center gap-3 mb-6 border-b border-slate-700 pb-4">
           <Code className="text-emerald-400" />
@@ -1374,13 +1798,22 @@ export default function App() {
       {/* Main Content */}
       <main className="flex-1 overflow-y-auto h-full relative">
         <header className="bg-white border-b border-slate-100 p-6 flex justify-between items-center sticky top-0 z-10 backdrop-blur-md bg-white/80">
-          <div>
-             <h1 className="text-2xl font-black text-slate-800 capitalize tracking-tight">
-               {currentView === 'pos' ? 'Punto de Venta' : currentView === 'ai' ? 'Asistente Virtual' : currentView}
-             </h1>
-             <p className="text-sm text-slate-400 font-medium">
-               {config.shopName} - {new Date().toLocaleDateString('es-MX', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}
-             </p>
+          <div className="flex items-center gap-4">
+             <div>
+               <h1 className="text-2xl font-black text-slate-800 capitalize tracking-tight">
+                 {currentView === 'pos' ? 'Punto de Venta' : currentView === 'ai' ? 'Asistente Virtual' : currentView}
+               </h1>
+               <p className="text-sm text-slate-400 font-medium">
+                 {config.shopName} - {new Date().toLocaleDateString('es-MX', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}
+               </p>
+             </div>
+             {/* Sync Status Badge */}
+             {userInfo?.connected && (
+               <div className="flex items-center gap-2 px-3 py-1 bg-blue-50 text-blue-600 rounded-full text-xs font-bold animate-in fade-in">
+                 {isSyncing ? <Loader2 size={12} className="animate-spin" /> : <Cloud size={12} />}
+                 {isSyncing ? 'Sincronizando...' : 'Nube Activa'}
+               </div>
+             )}
           </div>
           <div className="flex items-center gap-3">
              <div className="hidden md:flex flex-col items-end">
