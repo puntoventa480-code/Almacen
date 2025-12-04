@@ -1,0 +1,5 @@
+{
+  "name": "Gestor Pro Local",
+  "description": "Offline-first inventory and debt management system with local database and dynamic configuration API.",
+  "requestFramePermissions": []
+}
